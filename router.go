@@ -74,19 +74,23 @@
 //  // by the index of the parameter. This way you can also get the name (key)
 //  thirdKey   := ps[2].Key   // the name of the 3rd parameter
 //  thirdValue := ps[2].Value // the value of the 3rd parameter
-package httprouter
+package slrouter
 
 import (
 	"context"
 	"net/http"
 	"strings"
 	"sync"
+
+	"github.com/go-www/silverlining"
 )
 
 // Handle is a function that can be registered to a route to handle HTTP
 // requests. Like http.HandlerFunc, but has a third parameter for the values of
 // wildcards (path variables).
-type Handle func(http.ResponseWriter, *http.Request, Params)
+type Handle func(*silverlining.Context, Params)
+
+type Handler func(*silverlining.Context)
 
 // Param is a single URL parameter, consisting of a key and a value.
 type Param struct {
@@ -181,32 +185,29 @@ type Router struct {
 	// The handler is only called if HandleOPTIONS is true and no OPTIONS
 	// handler for the specific path was set.
 	// The "Allowed" header is set before calling the handler.
-	GlobalOPTIONS http.Handler
+	GlobalOPTIONS Handler
 
 	// Cached value of global (*) allowed methods
 	globalAllowed string
 
 	// Configurable http.Handler which is called when no matching route is
 	// found. If it is not set, http.NotFound is used.
-	NotFound http.Handler
+	NotFound Handler
 
 	// Configurable http.Handler which is called when a request
 	// cannot be routed and HandleMethodNotAllowed is true.
 	// If it is not set, http.Error with http.StatusMethodNotAllowed is used.
 	// The "Allow" header with allowed request methods is set before the handler
 	// is called.
-	MethodNotAllowed http.Handler
+	MethodNotAllowed Handler
 
 	// Function to handle panics recovered from http handlers.
 	// It should be used to generate a error page and return the http error code
 	// 500 (Internal Server Error).
 	// The handler can be used to keep your server from crashing because of
 	// unrecovered panics.
-	PanicHandler func(http.ResponseWriter, *http.Request, interface{})
+	PanicHandler func(*silverlining.Context, interface{})
 }
-
-// Make sure the Router conforms with the http.Handler interface
-var _ http.Handler = New()
 
 // New returns a new initialized Router.
 // Path auto-correction, including trailing slashes, is enabled by default.
@@ -232,16 +233,16 @@ func (r *Router) putParams(ps *Params) {
 }
 
 func (r *Router) saveMatchedRoutePath(path string, handle Handle) Handle {
-	return func(w http.ResponseWriter, req *http.Request, ps Params) {
+	return func(c *silverlining.Context, ps Params) {
 		if ps == nil {
 			psp := r.getParams()
 			ps = (*psp)[0:1]
 			ps[0] = Param{Key: MatchedRoutePathParam, Value: path}
-			handle(w, req, ps)
+			handle(c, ps)
 			r.putParams(psp)
 		} else {
 			ps = append(ps, Param{Key: MatchedRoutePathParam, Value: path})
-			handle(w, req, ps)
+			handle(c, ps)
 		}
 	}
 }
@@ -335,28 +336,6 @@ func (r *Router) Handle(method, path string, handle Handle) {
 	}
 }
 
-// Handler is an adapter which allows the usage of an http.Handler as a
-// request handle.
-// The Params are available in the request context under ParamsKey.
-func (r *Router) Handler(method, path string, handler http.Handler) {
-	r.Handle(method, path,
-		func(w http.ResponseWriter, req *http.Request, p Params) {
-			if len(p) > 0 {
-				ctx := req.Context()
-				ctx = context.WithValue(ctx, ParamsKey, p)
-				req = req.WithContext(ctx)
-			}
-			handler.ServeHTTP(w, req)
-		},
-	)
-}
-
-// HandlerFunc is an adapter which allows the usage of an http.HandlerFunc as a
-// request handle.
-func (r *Router) HandlerFunc(method, path string, handler http.HandlerFunc) {
-	r.Handler(method, path, handler)
-}
-
 // ServeFiles serves files from the given file system root.
 // The path must end with "/*filepath", files are then served from the local
 // path /defined/root/dir/*filepath.
@@ -372,17 +351,16 @@ func (r *Router) ServeFiles(path string, root http.FileSystem) {
 		panic("path must end with /*filepath in path '" + path + "'")
 	}
 
-	fileServer := http.FileServer(root)
+	//fileServer := http.FileServer(root)
 
-	r.GET(path, func(w http.ResponseWriter, req *http.Request, ps Params) {
-		req.URL.Path = ps.ByName("filepath")
-		fileServer.ServeHTTP(w, req)
+	r.GET(path, func(c *silverlining.Context, ps Params) {
+		//fileServer.ServeHTTP(w, req)
 	})
 }
 
-func (r *Router) recv(w http.ResponseWriter, req *http.Request) {
+func (r *Router) recv(c *silverlining.Context) {
 	if rcv := recover(); rcv != nil {
-		r.PanicHandler(w, req, rcv)
+		r.PanicHandler(c, rcv)
 	}
 }
 
@@ -458,9 +436,9 @@ func (r *Router) allowed(path, reqMethod string) (allow string) {
 }
 
 // ServeHTTP makes the router implement the http.Handler interface.
-func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+func (r *Router) ServeHTTP(c *silverlining.Context, req *http.Request) {
 	if r.PanicHandler != nil {
-		defer r.recv(w, req)
+		defer r.recv(c)
 	}
 
 	path := req.URL.Path
@@ -468,10 +446,10 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if root := r.trees[req.Method]; root != nil {
 		if handle, ps, tsr := root.getValue(path, r.getParams); handle != nil {
 			if ps != nil {
-				handle(w, req, *ps)
+				handle(c, *ps)
 				r.putParams(ps)
 			} else {
-				handle(w, req, nil)
+				handle(c, nil)
 			}
 			return
 		} else if req.Method != http.MethodConnect && path != "/" {
@@ -488,7 +466,8 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				} else {
 					req.URL.Path = path + "/"
 				}
-				http.Redirect(w, req, req.URL.String(), code)
+				//http.Redirect(w, req, req.URL.String(), code)
+				c.Redirect(code, req.URL.String())
 				return
 			}
 
@@ -500,7 +479,8 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				)
 				if found {
 					req.URL.Path = fixedPath
-					http.Redirect(w, req, req.URL.String(), code)
+					//http.Redirect(w, req, req.URL.String(), code)
+					c.Redirect(code, req.URL.String())
 					return
 				}
 			}
@@ -510,22 +490,27 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.Method == http.MethodOptions && r.HandleOPTIONS {
 		// Handle OPTIONS requests
 		if allow := r.allowed(path, http.MethodOptions); allow != "" {
-			w.Header().Set("Allow", allow)
+			//w.Header().Set("Allow", allow)
+			c.ResponseHeaders().Set("Allow", allow)
 			if r.GlobalOPTIONS != nil {
-				r.GlobalOPTIONS.ServeHTTP(w, req)
+				//r.GlobalOPTIONS.ServeHTTP(w, req)
+				r.GlobalOPTIONS(c)
 			}
 			return
 		}
 	} else if r.HandleMethodNotAllowed { // Handle 405
 		if allow := r.allowed(path, req.Method); allow != "" {
-			w.Header().Set("Allow", allow)
+			//w.Header().Set("Allow", allow)
+			c.ResponseHeaders().Set("Allow", allow)
 			if r.MethodNotAllowed != nil {
-				r.MethodNotAllowed.ServeHTTP(w, req)
+				//r.MethodNotAllowed.ServeHTTP(w, req)
+				r.MethodNotAllowed(c)
 			} else {
-				http.Error(w,
-					http.StatusText(http.StatusMethodNotAllowed),
-					http.StatusMethodNotAllowed,
-				)
+				// http.Error(w,
+				// 	http.StatusText(http.StatusMethodNotAllowed),
+				// 	http.StatusMethodNotAllowed,
+				// )
+				c.WriteFullBodyString(http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
 			}
 			return
 		}
@@ -533,8 +518,9 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	// Handle 404
 	if r.NotFound != nil {
-		r.NotFound.ServeHTTP(w, req)
+		//r.NotFound.ServeHTTP(c, req)
+		r.NotFound(c)
 	} else {
-		http.NotFound(w, req)
+		c.WriteFullBodyString(http.StatusNotFound, http.StatusText(http.StatusNotFound))
 	}
 }
